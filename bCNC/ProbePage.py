@@ -6,6 +6,7 @@
 
 # import time
 import math
+import re
 import sys
 from tkinter import (
     YES,
@@ -36,9 +37,11 @@ from tkinter import (
     BooleanVar,
     Button,
     Checkbutton,
+    Frame,
     Label,
     Scale,
     Spinbox,
+    Text,
     LabelFrame,
     messagebox,
 )
@@ -49,6 +52,7 @@ import Ribbon
 import tkExtra
 import Utils
 from CNC import CNC, Block
+from circle_fit import hyperLSQ
 
 from Helpers import N_
 
@@ -443,6 +447,96 @@ class ProbeCommonFrame(CNCRibbon.PageFrame):
 class ProbeFrame(CNCRibbon.PageFrame):
     def __init__(self, master, app):
         CNCRibbon.PageFrame.__init__(self, master, "Probe:Probe", app)
+
+        # ----------------------------------------------------------------
+        # Circle probing
+        # ----------------------------------------------------------------
+
+        lframe = tkExtra.ExLabelFrame(
+            self, text=_("Circle Probing"), foreground="DarkBlue"
+        )
+        lframe.pack(side=TOP, expand=YES, fill=X)
+
+        Label(lframe(), text=_("Probe Repeat:")).grid(row=0, column=0, sticky=E)
+        self.probeRepeat = IntVar()
+        b = Checkbutton(
+            lframe(),
+            variable=self.probeRepeat,
+            padx=2,
+            pady=5,
+        )
+        b.grid(row=0, column=1, sticky=W)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Repeat probing?"))
+
+        Label(lframe(), text=_("Probe Points:")).grid(row=1, column=0, sticky=E)
+        self.probePointCount = tkExtra.IntegerEntry(
+            lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.probePointCount.grid(row=1, column=1, sticky=EW)
+        tkExtra.Balloon.set(self.probePointCount, _("Number of probe points"))
+        self.addWidget(self.probePointCount)
+
+        Label(lframe(), text=_("Inner Diameter:")).grid(row=2, column=0, sticky=E)
+        self.innerDiameter = tkExtra.FloatEntry(
+            lframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.innerDiameter.grid(row=2, column=1, sticky=EW)
+        tkExtra.Balloon.set(self.innerDiameter, _("Probe internal diameter"))
+        self.addWidget(self.innerDiameter)
+
+        # ---
+        b = Button(
+            lframe(),
+            image=Utils.icons["target32"],
+            text=_("Probe ID"),
+            compound=LEFT,
+            command=self.probeInnerDiameter,
+            padx=5,
+            pady=0,
+        )
+        b.grid(row=2, column=2, sticky=EW)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Start probing inner diameter"))
+
+        self.probeHistory = Text(
+            lframe(), height=12, background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        # self.probeHistory.config(state="disabled")
+        self.probeHistory.grid(row=3, column=0, columnspan=2, sticky=NSEW)
+        tkExtra.Balloon.set(self.probeHistory, _("Probe History"))
+        self.addWidget(self.probeHistory)
+
+        lframe().grid_columnconfigure(1, weight=1)
+
+        frame = Frame(lframe())
+        frame.grid(row=3, column=2, sticky=NSEW)
+
+        b = Button(
+            frame,
+            image=Utils.icons["start32"],
+            text=_("Process"),
+            compound=LEFT,
+            command=self.runCircleFit,
+            padx=5,
+            pady=0,
+        )
+        b.pack(side=BOTTOM, fill=X)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Run circle fit"))
+
+        b = Button(
+            frame,
+            image=Utils.icons["clean32"],
+            text=_("Clear"),
+            compound=LEFT,
+            command=self.clearProbeHistory,
+            padx=5,
+            pady=0,
+        )
+        b.pack(side=BOTTOM, fill=X)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Clear probe history"))
 
         # ----------------------------------------------------------------
         # Record point
@@ -888,6 +982,12 @@ class ProbeFrame(CNCRibbon.PageFrame):
         except Exception:
             return
 
+        x = CNC.vars.get("prbx")
+        y = CNC.vars.get("prby")
+        z = CNC.vars.get("prbz")
+        if x != 0 or y != 0 or z != 0:
+            self.insertProbeHistory(f"{x},{y},{z}\n")
+
         if self.probeautogotonext:
             self.probeautogotonext = False
             self.goto2Probe()
@@ -1007,6 +1107,155 @@ class ProbeFrame(CNCRibbon.PageFrame):
         lines.append("g53 g0 y[0.5*(tmp+prby)]")
         lines.append("%wait")
         lines.append("g90")
+        self.app.run(lines=lines)
+
+    # -----------------------------------------------------------------------
+    # Probe History
+    # -----------------------------------------------------------------------
+
+    def clearProbeHistory(self):
+        isTextDisabled = self.probeHistory["state"] == "disabled"
+        if isTextDisabled:
+            self.probeHistory.config(state="normal")
+
+        self.probeHistory.delete(1.0, END)
+
+        if isTextDisabled:
+            self.probeHistory.config(state="disabled")
+
+    def insertProbeHistory(self, text):
+        isTextDisabled = self.probeHistory["state"] == "disabled"
+        if isTextDisabled:
+            self.probeHistory.config(state="normal")
+
+        self.probeHistory.insert(END, text)
+
+        if isTextDisabled:
+            self.probeHistory.config(state="disabled")
+
+    # -----------------------------------------------------------------------
+    # Circle Probe
+    # -----------------------------------------------------------------------
+
+    def runCircleFit(self):
+        regexp = re.compile(r"^(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+)$")
+        coords = []
+
+        lines = self.probeHistory.get(1.0, END).splitlines()
+        for line in lines:
+            match = regexp.match(line.strip())
+            if match:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                coords.append([x, y])
+        if len(coords) < 3:
+            messagebox.showerror(
+                _("Circle Fit Error"),
+                _(f"Invalid number of coordinates found: {len(coords)}"),
+                parent=self.winfo_toplevel(),
+            )
+            return
+
+        xc, yc, r, sigma = hyperLSQ(coords)
+        print(f"Circle fit: c=[{xc}, {yc}], r={r}, sigma={sigma}")
+
+        # Rapid to calculated center
+        lines = [
+            f"G53 G0 x{xc} y{yc}",
+            "%wait",
+        ]
+        self.app.run(lines=lines)
+
+    @staticmethod
+    def probeExtents(cmd, axis, distance):
+        return [
+            # +ve
+            f"{cmd} {axis}{distance}",
+            "%wait",
+            f"fast_{axis}=prb{axis}",
+            f"G91 G0 {axis}{-0.1*distance}",
+            "%wait",
+            # -ve
+            f"{cmd} {axis}-{distance}",
+            "%wait",
+            f"mid_{axis}=0.5*(fast_{axis}+prb{axis})",
+            f"extent_{axis}=fast_{axis}-prb{axis}",
+            f"G53 G0 {axis}[mid_{axis}]",
+            "%wait",
+        ]
+
+    def probeInnerDiameter(self, event=None):
+        self.warnMessage()
+
+        fastPrb = f"G91 {CNC.vars['prbcmd']} F{CNC.vars['fastprbfeed']}"
+        prb = f"G91 {CNC.vars['prbcmd']} F{CNC.vars['prbfeed']}"
+
+        try:
+            probePointCount = int(self.probePointCount.get())
+        except Exception:
+            probePointCount = 0
+
+        if probePointCount < 4:
+            messagebox.showerror(
+                _("Probe Inner Diameter Error"),
+                _("Invalid probe count entered"),
+                parent=self.winfo_toplevel(),
+            )
+            return
+
+        try:
+            diameter = abs(float(self.innerDiameter.get()))
+        except Exception:
+            diameter = 0.0
+
+        if diameter < 0.001:
+            messagebox.showerror(
+                _("Probe Inner Diameter Error"),
+                _("Invalid diameter entered"),
+                parent=self.winfo_toplevel(),
+            )
+            return
+
+        lines = []
+
+        # Fast probe 4 points to estimate center and diameter
+        # Extent is stored in `extent_y` variable in gcode
+        lines.extend(ProbeFrame.probeExtents(fastPrb, "x", diameter))
+        lines.extend(ProbeFrame.probeExtents(fastPrb, "y", diameter))
+        lines.append("r=0.5*extent_y")
+
+        probeRepeat = bool(self.probeRepeat.get())
+        iterationCount = 2 if probeRepeat else 1
+        for j in range(iterationCount):
+            # Probe N times, travelling in circle
+            rapidAmount = 0.95
+            probeAmount = 1.1 - rapidAmount
+            for i in range(probePointCount):
+                angle = 2.0 * math.pi * i / probePointCount
+                dx = math.cos(angle)
+                dy = math.sin(angle)
+                lines.extend(
+                    [
+                        f"G53 G0 x[mid_x+{rapidAmount}*r*{dx}] y[mid_y+{rapidAmount}*r*{dy}]",
+                        "%wait",
+                        f"{prb} x[{probeAmount}*r*{dx}] y[{probeAmount}*r*{dy}]",
+                        "%wait",
+                        f"G53 G0 x[mid_x+{rapidAmount}*r*{dx}] y[mid_y+{rapidAmount}*r*{dy}]",
+                        "%wait",
+                    ]
+                )
+
+            # Go back to estimated mid
+            lines.append("G53 G0 x[mid_x] y[mid_y]")
+            lines.append("%wait")
+
+            # Repeat if necessary
+            if probeRepeat and j == 0:
+                lines.append("%msg Rotate probe 180 degrees.")
+                lines.append("M0")
+
+        lines.append("g90")
+
         self.app.run(lines=lines)
 
     # -----------------------------------------------------------------------
