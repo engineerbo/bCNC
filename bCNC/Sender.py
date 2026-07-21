@@ -571,7 +571,11 @@ class Sender:
         self.mcontrol.unlock(clearAlarm)
 
     def home(self, event=None):
-        self.mcontrol.home(event)
+        if messagebox.askyesno(
+            _("Home Machine"),
+            _("Are you sure you want to perform a homing cycle?"),
+        ):
+            self.mcontrol.home(event)
 
     def viewSettings(self):
         self.mcontrol.viewSettings()
