@@ -449,6 +449,64 @@ class ProbeFrame(CNCRibbon.PageFrame):
         CNCRibbon.PageFrame.__init__(self, master, "Probe:Probe", app)
 
         # ----------------------------------------------------------------
+        # Axis center probing
+        # ----------------------------------------------------------------
+
+        aframe = tkExtra.ExLabelFrame(
+            self, text=_("Axis Center Probing"), foreground="DarkBlue"
+        )
+        aframe.pack(side=TOP, expand=YES, fill=X)
+
+        Label(aframe(), text=_("Probe Repeat:")).grid(row=0, column=0, sticky=E)
+        self.axisProbeRepeat = IntVar()
+        b = Checkbutton(
+            aframe(),
+            variable=self.axisProbeRepeat,
+            padx=2,
+            pady=5,
+        )
+        b.grid(row=0, column=1, sticky=W)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Repeat probing?"))
+
+        Label(aframe(), text=_("Probe Distance:")).grid(row=0, column=2, sticky=E)
+        self.axisProbeDistance = tkExtra.FloatEntry(
+            aframe(), background=tkExtra.GLOBAL_CONTROL_BACKGROUND
+        )
+        self.axisProbeDistance.grid(row=0, column=3, sticky=EW)
+        tkExtra.Balloon.set(self.axisProbeDistance, _("Probe distance"))
+        self.addWidget(self.axisProbeDistance)
+
+        aframe().grid_columnconfigure(3, weight=1)
+
+        btnframe = Frame(aframe())
+        btnframe.grid(row=1, column=0, columnspan=4, sticky=EW)
+
+        b = Button(
+            btnframe,
+            text=_("Probe X"),
+            compound=LEFT,
+            command=lambda: self.probeAxisCenter("x"),
+            padx=10,
+            pady=10,
+        )
+        b.pack(side=LEFT, expand=YES, fill=X)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Probe center along X axis"))
+
+        b = Button(
+            btnframe,
+            text=_("Probe Y"),
+            compound=LEFT,
+            command=lambda: self.probeAxisCenter("y"),
+            padx=10,
+            pady=10,
+        )
+        b.pack(side=LEFT, expand=YES, fill=X)
+        self.addWidget(b)
+        tkExtra.Balloon.set(b, _("Probe center along Y axis"))
+
+        # ----------------------------------------------------------------
         # Circle probing
         # ----------------------------------------------------------------
 
@@ -1183,6 +1241,82 @@ class ProbeFrame(CNCRibbon.PageFrame):
             f"G53 G0 {axis}[mid_{axis}]",
             "%wait",
         ]
+
+    @staticmethod
+    def probeAxis(axis, travel):
+        fastPrb = f"G91 {CNC.vars['prbcmd']} F{CNC.vars['fastprbfeed']}"
+        prb = f"G91 {CNC.vars['prbcmd']} F{CNC.vars['prbfeed']}"
+
+        sign = math.copysign(1, travel)
+        retract = -sign * min(abs(travel), 3)
+        prbTravel = sign * min(abs(travel), 6)
+
+        return [
+            f"{fastPrb} {axis}{travel}",
+            "%wait",
+            f"G91 G0 {axis}{retract}",
+            "%wait",
+            f"{prb} {axis}{prbTravel}",
+            "%wait",
+            f"G91 G0 {axis}{retract}",
+            "%wait",
+        ]
+
+    # -----------------------------------------------------------------------
+    # Axis Center Probe
+    # -----------------------------------------------------------------------
+    def probeAxisCenter(self, axis, event=None):
+        self.warnMessage()
+
+        try:
+            distance = abs(float(self.axisProbeDistance.get()))
+        except Exception:
+            distance = 0.0
+
+        if distance < 1:
+            messagebox.showerror(
+                _("Probe Axis Center Error"),
+                _("Invalid probe distance entered"),
+                parent=self.winfo_toplevel(),
+            )
+            return
+
+        probeRepeat = bool(self.axisProbeRepeat.get())
+
+        lines = []
+
+        # First pass
+        lines.extend(ProbeFrame.probeAxis(axis, -distance))
+        lines.append(f"axis_pass1_neg=prb{axis}")
+        lines.extend(ProbeFrame.probeAxis(axis, distance))
+        lines.append(f"axis_pass1_pos=prb{axis}")
+
+        if probeRepeat:
+            # Pause for probe rotation
+            lines.append("%msg Rotate probe 180 degrees.")
+            lines.append("M0")
+
+            # Second pass
+            lines.extend(ProbeFrame.probeAxis(axis, -distance))
+            lines.append(f"axis_pass2_neg=prb{axis}")
+            lines.extend(ProbeFrame.probeAxis(axis, distance))
+            lines.append(f"axis_pass2_pos=prb{axis}")
+
+            # True center from all 4 slow probe results
+            lines.append(
+                "axis_true=0.25*(axis_pass1_pos+axis_pass1_neg+axis_pass2_pos+axis_pass2_neg)"
+            )
+            lines.append(f"G53 G0 {axis}[axis_true]")
+            lines.append("%wait")
+        else:
+            # Midpoint from 2 slow probe results
+            lines.append("axis_mid=0.5*(axis_pass1_pos+axis_pass1_neg)")
+            lines.append(f"G53 G0 {axis}[axis_mid]")
+            lines.append("%wait")
+
+        lines.append("g90")
+
+        self.app.run(lines=lines)
 
     def probeInnerDiameter(self, event=None):
         self.warnMessage()
